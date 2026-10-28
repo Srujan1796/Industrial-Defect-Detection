@@ -1,149 +1,90 @@
-import os
-import csv
-from io import BytesIO
-from datetime import datetime
-
 import streamlit as st
 import torch
 import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
+import torchvision.models as models
+import torchvision.transforms as transforms
 
-from reportlab.lib import colors
+from PIL import Image
+from datetime import datetime
+from io import BytesIO
+import pandas as pd
+
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
+    Image as PDFImage,
     Table,
-    TableStyle,
-    Image as PDFImage
+    TableStyle
 )
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
 
 
-# ---------------- PAGE SETUP ----------------
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
 
 st.set_page_config(
     page_title="Industrial Defect Detection",
-    page_icon="🔍",
+    page_icon="🏭",
     layout="wide"
 )
 
 
-# ---------------- CUSTOM STYLING ----------------
+# --------------------------------------------------
+# CUSTOM CSS
+# --------------------------------------------------
 
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #E8EDF3;
-    }
-
+st.markdown(
+    """
+    <style>
     .main-title {
-        background-color: #14213D;
-        color: white;
-        padding: 25px;
         text-align: center;
+        color: #1565C0;
+        font-size: 36px;
+        font-weight: bold;
+    }
+
+    .subtitle {
+        text-align: center;
+        color: #666666;
+        font-size: 17px;
+    }
+
+    .result-box {
+        padding: 20px;
         border-radius: 10px;
-        margin-bottom: 20px;
-    }
-
-    .main-title h1 {
-        color: white;
-    }
-
-    .main-title p {
-        color: #DCE7F5;
-    }
-
-    .result-card {
-        background-color: white;
-        padding: 25px;
-        border-radius: 10px;
-        border: 1px solid #C5D0DC;
+        background-color: #F0F2F6;
         text-align: center;
     }
 
-    .normal-result {
-        color: #187A3D;
-        font-size: 25px;
-        font-weight: bold;
-    }
-
-    .defect-result {
-        color: #B42318;
-        font-size: 25px;
-        font-weight: bold;
-    }
-
-    .section-title {
-        color: #14213D;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ---------------- HEADER ----------------
-
-st.markdown("""
-<div class="main-title">
-    <h1>INDUSTRIAL DEFECT DETECTION</h1>
-    <p>AI-POWERED CASTING INSPECTION | RESNET18</p>
-</div>
-""", unsafe_allow_html=True)
-
-
-st.write(
-    "Upload a casting image to inspect it using the trained "
-    "deep learning model."
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
 
-# ---------------- MODEL SETUP ----------------
+# --------------------------------------------------
+# MODEL CONFIGURATION
+# --------------------------------------------------
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = "industrial_defect_model_final.pth"
 
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "industrial_defect_model_final.pth"
-)
+CLASS_NAMES = [
+    "def_front",
+    "ok_front"
+]
 
 DEVICE = torch.device("cpu")
 
-CLASSES = ["def_front", "ok_front"]
 
-
-@st.cache_resource
-def load_model():
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            "Model file not found. Make sure "
-            "industrial_defect_model_final.pth is in the repository."
-        )
-
-    model = models.resnet18(weights=None)
-
-    model.fc = nn.Linear(
-        model.fc.in_features,
-        2
-    )
-
-    model.load_state_dict(
-        torch.load(
-            MODEL_PATH,
-            map_location=DEVICE,
-            weights_only=True
-        )
-    )
-
-    model.eval()
-
-    return model
-
-
-# ---------------- IMAGE PREPROCESSING ----------------
+# --------------------------------------------------
+# IMAGE TRANSFORMATIONS
+# Keep the same preprocessing used during training.
+# --------------------------------------------------
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -155,16 +96,37 @@ transform = transforms.Compose([
 ])
 
 
-# ---------------- SESSION STATE ----------------
+# --------------------------------------------------
+# LOAD TRAINED MODEL
+# --------------------------------------------------
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+@st.cache_resource
+def load_model():
 
-if "image_bytes" not in st.session_state:
-    st.session_state.image_bytes = None
+    model = models.resnet18(weights=None)
 
-if "image_name" not in st.session_state:
-    st.session_state.image_name = None
+    model.fc = nn.Linear(
+        model.fc.in_features,
+        2
+    )
+
+    state_dict = torch.load(
+        MODEL_PATH,
+        map_location=DEVICE,
+        weights_only=True
+    )
+
+    model.load_state_dict(state_dict)
+
+    model.to(DEVICE)
+    model.eval()
+
+    return model
+
+
+# --------------------------------------------------
+# INITIALIZE SESSION STATE
+# --------------------------------------------------
 
 if "prediction" not in st.session_state:
     st.session_state.prediction = None
@@ -175,141 +137,383 @@ if "confidence" not in st.session_state:
 if "inspection_time" not in st.session_state:
     st.session_state.inspection_time = None
 
+if "image_name" not in st.session_state:
+    st.session_state.image_name = None
 
-# ---------------- IMAGE UPLOAD ----------------
+if "image_bytes" not in st.session_state:
+    st.session_state.image_bytes = None
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0
+
+
+# --------------------------------------------------
+# PDF REPORT GENERATION
+# --------------------------------------------------
+
+def generate_pdf_report():
+
+    pdf_buffer = BytesIO()
+
+    document = SimpleDocTemplate(
+        pdf_buffer,
+        pagesize=A4,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=40,
+        bottomMargin=40
+    )
+
+    styles = getSampleStyleSheet()
+
+    story = []
+
+    story.append(
+        Paragraph(
+            "Industrial Defect Detection Report",
+            styles["Title"]
+        )
+    )
+
+    story.append(Spacer(1, 20))
+
+    story.append(
+        Paragraph(
+            "Inspection Details",
+            styles["Heading2"]
+        )
+    )
+
+    story.append(Spacer(1, 10))
+
+    details = [
+        ["Image Name", str(st.session_state.image_name)],
+        [
+            "Inspection Date",
+            str(st.session_state.inspection_time)
+        ],
+        [
+            "Prediction",
+            str(st.session_state.prediction)
+        ],
+        [
+            "Confidence",
+            f"{st.session_state.confidence:.2f}%"
+        ]
+    ]
+
+    details_table = Table(
+        details,
+        colWidths=[150, 300]
+    )
+
+    details_table.setStyle(
+        TableStyle([
+            (
+                "BACKGROUND",
+                (0, 0),
+                (0, -1),
+                colors.lightgrey
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.5,
+                colors.grey
+            ),
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "MIDDLE"
+            ),
+            (
+                "LEFTPADDING",
+                (0, 0),
+                (-1, -1),
+                8
+            ),
+            (
+                "TOPPADDING",
+                (0, 0),
+                (-1, -1),
+                8
+            ),
+            (
+                "BOTTOMPADDING",
+                (0, 0),
+                (-1, -1),
+                8
+            )
+        ])
+    )
+
+    story.append(details_table)
+    story.append(Spacer(1, 25))
+
+    story.append(
+        Paragraph(
+            "Inspected Image",
+            styles["Heading2"]
+        )
+    )
+
+    story.append(Spacer(1, 10))
+
+    image_stream = BytesIO(
+        st.session_state.image_bytes
+    )
+
+    report_image = PDFImage(
+        image_stream,
+        width=4 * inch,
+        height=3 * inch,
+        kind="proportional"
+    )
+
+    story.append(report_image)
+    story.append(Spacer(1, 20))
+
+    story.append(
+        Paragraph(
+            "This report contains the result generated by "
+            "the trained image classification model. "
+            "The prediction should be verified when "
+            "required by the inspection process.",
+            styles["BodyText"]
+        )
+    )
+
+    document.build(story)
+
+    pdf_buffer.seek(0)
+
+    return pdf_buffer.getvalue()
+
+
+# --------------------------------------------------
+# APPLICATION HEADER
+# --------------------------------------------------
+
+st.markdown(
+    '<div class="main-title">'
+    '🏭 Industrial Defect Detection'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'AI-Based Casting Image Inspection System'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+
+# --------------------------------------------------
+# LOAD MODEL
+# --------------------------------------------------
+
+try:
+
+    model = load_model()
+
+except Exception as error:
+
+    st.error(
+        f"Unable to load the trained model: {error}"
+    )
+
+    st.info(
+        "Check that industrial_defect_model_final.pth "
+        "exists in the project directory and that the "
+        "required packages are installed."
+    )
+
+    st.stop()
+
+
+# --------------------------------------------------
+# IMAGE UPLOAD SECTION
+# --------------------------------------------------
 
 st.subheader("1. Upload Casting Image")
 
 uploaded_file = st.file_uploader(
-    "Choose an image",
-    type=["jpg", "jpeg", "png", "bmp"],
-    key="image_uploader"
+    "Choose an image to inspect",
+    type=["jpg", "jpeg", "png"],
+    key=f"image_uploader_{st.session_state.uploader_version}"
 )
 
 
-# ---------------- HANDLE NEW IMAGE ----------------
+# --------------------------------------------------
+# HANDLE UPLOADED IMAGE
+# --------------------------------------------------
 
 if uploaded_file is not None:
 
-    new_image_bytes = uploaded_file.getvalue()
+    uploaded_bytes = uploaded_file.getvalue()
 
-    if (
-        st.session_state.image_bytes != new_image_bytes
-        or st.session_state.image_name != uploaded_file.name
-    ):
-        st.session_state.image_bytes = new_image_bytes
-        st.session_state.image_name = uploaded_file.name
+    # Clear the previous prediction when a new image
+    # is selected.
+    if uploaded_bytes != st.session_state.image_bytes:
+
         st.session_state.prediction = None
         st.session_state.confidence = None
         st.session_state.inspection_time = None
 
-
-# ---------------- PREDICTION BUTTON ----------------
-
-if st.session_state.image_bytes is not None:
+        st.session_state.image_bytes = uploaded_bytes
+        st.session_state.image_name = uploaded_file.name
 
     try:
+
         original_image = Image.open(
-            BytesIO(st.session_state.image_bytes)
+            BytesIO(uploaded_bytes)
         ).convert("RGB")
 
-        left, right = st.columns(2)
+        upload_left, upload_right = st.columns(2)
 
-        with left:
-            st.markdown(
-                "### Casting Image Preview"
-            )
+        with upload_left:
+
+            st.markdown("### Uploaded Image")
 
             st.image(
                 original_image,
-                caption=st.session_state.image_name,
+                caption=uploaded_file.name,
                 use_container_width=True
             )
 
-        with right:
-            st.markdown(
-                "### Inspection Control"
+        with upload_right:
+
+            st.markdown("### Image Information")
+
+            st.write(
+                f"**File name:** {uploaded_file.name}"
             )
 
             st.write(
-                "Run the model to inspect the uploaded image."
+                f"**Image width:** {original_image.width} pixels"
             )
 
-            if st.button(
-                "PREDICT DEFECT",
-                type="primary",
-                use_container_width=True
-            ):
+            st.write(
+                f"**Image height:** {original_image.height} pixels"
+            )
+
+            st.write(
+                f"**Image format:** {original_image.format or 'Converted to RGB'}"
+            )
+
+        st.divider()
+
+        # --------------------------------------------------
+        # PREDICTION BUTTON
+        # --------------------------------------------------
+
+        if st.button(
+            "🔍 Predict Defect",
+            type="primary",
+            use_container_width=True
+        ):
+
+            try:
 
                 with st.spinner(
-                    "Analyzing image..."
+                    "Analyzing the casting image..."
                 ):
 
-                    try:
-                        model = load_model()
+                    input_tensor = transform(
+                        original_image
+                    ).unsqueeze(0).to(DEVICE)
 
-                        image_tensor = transform(
-                            original_image
-                        ).unsqueeze(0).to(DEVICE)
+                    with torch.no_grad():
 
-                        with torch.no_grad():
+                        outputs = model(input_tensor)
 
-                            outputs = model(image_tensor)
+                        probabilities = torch.softmax(
+                            outputs,
+                            dim=1
+                        )
 
-                            probabilities = torch.softmax(
-                                outputs,
-                                dim=1
-                            )
-
-                            confidence, predicted = torch.max(
+                        confidence, predicted_class = (
+                            torch.max(
                                 probabilities,
                                 dim=1
                             )
-
-                        predicted_class = CLASSES[
-                            predicted.item()
-                        ]
-
-                        confidence_percent = (
-                            confidence.item() * 100
                         )
 
-                        if predicted_class == "def_front":
-                            prediction_text = "DEFECTIVE CASTING"
-                        else:
-                            prediction_text = "NORMAL CASTING"
+                    predicted_index = (
+                        predicted_class.item()
+                    )
 
-                        inspection_time = datetime.now().strftime(
+                    confidence_percent = (
+                        confidence.item() * 100
+                    )
+
+                    if predicted_index == 0:
+
+                        prediction_text = (
+                            "DEFECTIVE CASTING"
+                        )
+
+                    else:
+
+                        prediction_text = (
+                            "NORMAL CASTING"
+                        )
+
+                    inspection_time = (
+                        datetime.now().strftime(
                             "%Y-%m-%d %H:%M:%S"
                         )
+                    )
 
-                        st.session_state.prediction = prediction_text
+                    # Save the current prediction.
+                    st.session_state.prediction = (
+                        prediction_text
+                    )
 
-                        st.session_state.confidence = (
-                            confidence_percent
+                    st.session_state.confidence = (
+                        confidence_percent
+                    )
+
+                    st.session_state.inspection_time = (
+                        inspection_time
+                    )
+
+                    # Save the inspection to session history.
+                    st.session_state.history.append({
+                        "Date and Time": inspection_time,
+                        "Image Name": (
+                            st.session_state.image_name
+                        ),
+                        "Prediction": prediction_text,
+                        "Confidence": (
+                            f"{confidence_percent:.2f}%"
                         )
+                    })
 
-                        st.session_state.inspection_time = (
-                            inspection_time
-                        )
+            except Exception as error:
 
-                        # Save this inspection to session history.
-                        st.session_state.history.append({
-                            "Date and Time": inspection_time,
-                            "Image Name": st.session_state.image_name,
-                            "Prediction": prediction_text,
-                            "Confidence": (
-                                f"{confidence_percent:.2f}%"
-                            )
-                        })
+                st.error(
+                    f"Prediction failed: {error}"
+                )
 
-                    except Exception as error:
-                        st.error(
-                            f"Prediction failed: {error}"
-                        )
+    except Exception as error:
+
+        st.error(
+            f"Unable to open the uploaded image: {error}"
+        )
 
 
-# ---------------- DISPLAY RESULT ----------------
+# --------------------------------------------------
+# DISPLAY INSPECTION RESULT
+# --------------------------------------------------
 
 if st.session_state.prediction is not None:
 
@@ -321,401 +525,214 @@ if st.session_state.prediction is not None:
 
     with result_left:
 
-        st.markdown(
-            "### Prediction"
-        )
+        st.markdown("### Prediction")
 
         if (
             st.session_state.prediction
             == "DEFECTIVE CASTING"
         ):
-            st.markdown(
-                '<div class="result-card">'
-                '<div class="defect-result">'
-                'DEFECTIVE CASTING'
-                '</div></div>',
-                unsafe_allow_html=True
-            )
 
             st.error(
-                "The model classified this image "
-                "as a defective casting."
+                "⚠️ DEFECTIVE CASTING"
             )
 
         else:
-            st.markdown(
-                '<div class="result-card">'
-                '<div class="normal-result">'
-                'NORMAL CASTING'
-                '</div></div>',
-                unsafe_allow_html=True
-            )
 
             st.success(
-                "The model classified this image "
-                "as a normal casting."
+                "✅ NORMAL CASTING"
             )
 
-    with result_right:
-
-        st.markdown(
-            "### Confidence"
-        )
-
         st.metric(
-            "Prediction Confidence",
+            "Model Confidence",
             f"{st.session_state.confidence:.2f}%"
         )
 
-        st.progress(
-            min(
-                max(
-                    int(st.session_state.confidence),
-                    0
-                ),
-                100
-            )
+        st.write(
+            f"**Inspection time:** "
+            f"{st.session_state.inspection_time}"
         )
+
+        st.write(
+            f"**Image name:** "
+            f"{st.session_state.image_name}"
+        )
+
+    with result_right:
+
+        st.markdown("### Inspection Summary")
+
+        if (
+            st.session_state.prediction
+            == "DEFECTIVE CASTING"
+        ):
+
+            st.warning(
+                "The model classified this image as "
+                "a defective casting. Review the image "
+                "before making a final quality decision."
+            )
+
+        else:
+
+            st.success(
+                "The model classified this image as "
+                "a normal casting."
+            )
 
         st.caption(
-            "Confidence is the model's softmax score, "
-            "not a guarantee that the prediction is correct."
+            "Confidence represents the model's predicted "
+            "probability for the selected class. It does "
+            "not guarantee that the classification is correct."
         )
 
+
+# --------------------------------------------------
+# IMAGE COMPARISON
+# --------------------------------------------------
+
+if (
+    st.session_state.prediction is not None
+    and st.session_state.image_bytes is not None
+):
+
+    st.divider()
+
+    st.subheader("3. Compare Image and Result")
+
+    compare_left, compare_right = st.columns(2)
+
+    with compare_left:
+
+        st.markdown("### Original Image")
+
+        st.image(
+            Image.open(
+                BytesIO(
+                    st.session_state.image_bytes
+                )
+            ).convert("RGB"),
+            use_container_width=True
+        )
+
+    with compare_right:
+
+        st.markdown("### Prediction Result")
+
+        st.markdown(
+            f"**{st.session_state.prediction}**"
+        )
+
+        st.metric(
+            "Confidence",
+            f"{st.session_state.confidence:.2f}%"
+        )
+
+
+# --------------------------------------------------
+# PREDICTION HISTORY
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("4. Prediction History")
+
+if st.session_state.history:
+
+    history_df = pd.DataFrame(
+        st.session_state.history
+    )
+
+    st.dataframe(
+        history_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    csv_data = history_df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        label="⬇️ Download History as CSV",
+        data=csv_data,
+        file_name="prediction_history.csv",
+        mime="text/csv"
+    )
+
+else:
+
     st.info(
-        "Date and time: "
-        + str(st.session_state.inspection_time)
+        "No inspections have been performed in this session yet."
     )
 
 
-# ---------------- FEATURE TABS ----------------
+# --------------------------------------------------
+# PDF REPORT
+# --------------------------------------------------
 
 st.divider()
 
-tab_compare, tab_history, tab_report = st.tabs([
-    "🖼️ Compare Image & Result",
-    "📋 View History",
-    "📄 Generate PDF Report"
-])
+st.subheader("5. Generate PDF Report")
 
+if st.session_state.prediction is not None:
 
-# ---------------- COMPARE IMAGE & RESULT ----------------
+    try:
 
-with tab_compare:
-
-    st.subheader("Casting Inspection Comparison")
-
-    if st.session_state.prediction is None:
-
-        st.info(
-            "Upload an image and click PREDICT DEFECT "
-            "to view the comparison."
-        )
-
-    else:
-
-        original_column, result_column = st.columns(2)
-
-        with original_column:
-
-            st.markdown(
-                "### Original Casting Image"
-            )
-
-            st.image(
-                Image.open(
-                    BytesIO(st.session_state.image_bytes)
-                ).convert("RGB"),
-                use_container_width=True
-            )
-
-            st.caption(
-                st.session_state.image_name
-            )
-
-        with result_column:
-
-            st.markdown(
-                "### AI Inspection Result"
-            )
-
-            st.write(
-                st.session_state.prediction
-            )
-
-            st.write(
-                "Confidence: "
-                f"{st.session_state.confidence:.2f}%"
-            )
-
-            if (
-                st.session_state.prediction
-                == "DEFECTIVE CASTING"
-            ):
-                st.error(
-                    "Defective casting detected by the model."
-                )
-            else:
-                st.success(
-                    "Normal casting predicted by the model."
-                )
-
-        st.warning(
-            "AI predictions should be verified before "
-            "making important industrial decisions."
-        )
-
-
-# ---------------- VIEW PREDICTION HISTORY ----------------
-
-with tab_history:
-
-    st.subheader("Prediction History")
-
-    if not st.session_state.history:
-
-        st.info(
-            "No inspection records yet. "
-            "Upload an image and run a prediction."
-        )
-
-    else:
-
-        st.dataframe(
-            st.session_state.history,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        csv_buffer = BytesIO()
-
-        csv_text = csv.DictWriter
-
-        import pandas as pd
-
-        history_df = pd.DataFrame(
-            st.session_state.history
-        )
+        pdf_data = generate_pdf_report()
 
         st.download_button(
-            label="Download History as CSV",
-            data=history_df.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name="prediction_history.csv",
-            mime="text/csv"
+            label="📄 Download Inspection Report (PDF)",
+            data=pdf_data,
+            file_name="industrial_defect_report.pdf",
+            mime="application/pdf"
         )
 
-        st.caption(
-            "History is maintained for this browser session. "
-            "It is not a permanent shared database."
+    except Exception as error:
+
+        st.error(
+            f"Unable to generate PDF report: {error}"
         )
 
+else:
 
-# ---------------- GENERATE PDF REPORT ----------------
-
-with tab_report:
-
-    st.subheader("Generate Inspection PDF Report")
-
-    if st.session_state.prediction is None:
-
-        st.info(
-            "Run a prediction first to generate a report."
-        )
-
-    else:
-
-        st.write(
-            "Create a PDF containing the inspected image, "
-            "prediction, confidence score, date, and model name."
-        )
-
-        if st.button(
-            "GENERATE PDF REPORT",
-            type="primary"
-        ):
-
-            try:
-
-                pdf_buffer = BytesIO()
-
-                document = SimpleDocTemplate(
-                    pdf_buffer,
-                    pagesize=A4,
-                    rightMargin=45,
-                    leftMargin=45,
-                    topMargin=45,
-                    bottomMargin=45
-                )
-
-                styles = getSampleStyleSheet()
-
-                story = []
-
-                story.append(
-                    Paragraph(
-                        "INDUSTRIAL DEFECT DETECTION",
-                        styles["Title"]
-                    )
-                )
-
-                story.append(
-                    Paragraph(
-                        "CASTING INSPECTION REPORT",
-                        styles["Heading2"]
-                    )
-                )
-
-                story.append(
-                    Spacer(1, 20)
-                )
-
-                report_data = [
-                    ["Inspection Detail", "Value"],
-                    [
-                        "Date and Time",
-                        str(st.session_state.inspection_time)
-                    ],
-                    [
-                        "Image Name",
-                        str(st.session_state.image_name)
-                    ],
-                    [
-                        "Prediction",
-                        str(st.session_state.prediction)
-                    ],
-                    [
-                        "Confidence",
-                        f"{st.session_state.confidence:.2f}%"
-                    ],
-                    [
-                        "Model",
-                        "ResNet18"
-                    ]
-                ]
-
-                report_table = Table(
-                    report_data,
-                    colWidths=[1.7 * inch, 4.3 * inch]
-                )
-
-                report_table.setStyle(
-                    TableStyle([
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (-1, 0),
-                            colors.HexColor("#14213D")
-                        ),
-                        (
-                            "TEXTCOLOR",
-                            (0, 0),
-                            (-1, 0),
-                            colors.white
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.5,
-                            colors.grey
-                        ),
-                        (
-                            "PADDING",
-                            (0, 0),
-                            (-1, -1),
-                            8
-                        ),
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "TOP"
-                        )
-                    ])
-                )
-
-                story.append(report_table)
-
-                story.append(
-                    Spacer(1, 20)
-                )
-
-                story.append(
-                    Paragraph(
-                        "Inspected Casting Image",
-                        styles["Heading2"]
-                    )
-                )
-
-                image_buffer = BytesIO(
-                    st.session_state.image_bytes
-                )
-
-                pdf_image = PDFImage(
-                    image_buffer,
-                    width=4.5 * inch,
-                    height=3.5 * inch,
-                    kind="proportional"
-                )
-
-                story.append(pdf_image)
-
-                story.append(
-                    Spacer(1, 20)
-                )
-
-                story.append(
-                    Paragraph(
-                        "Note: This result is generated by a trained "
-                        "AI model. Verify important inspection "
-                        "decisions independently.",
-                        styles["BodyText"]
-                    )
-                )
-
-                document.build(story)
-
-                pdf_buffer.seek(0)
-
-                st.download_button(
-                    label="Download Inspection PDF",
-                    data=pdf_buffer.getvalue(),
-                    file_name="inspection_report.pdf",
-                    mime="application/pdf"
-                )
-
-            except Exception as error:
-
-                st.error(
-                    f"Could not generate the PDF report: {error}"
-                )
+    st.info(
+        "Upload an image and click Predict Defect "
+        "before generating a PDF report."
+    )
 
 
-# ---------------- RESET APPLICATION ----------------
+# --------------------------------------------------
+# RESET BUTTON
+# --------------------------------------------------
 
 st.divider()
 
-if st.button("RESET / CHECK ANOTHER IMAGE"):
+if st.button(
+    "🔄 Reset Current Inspection",
+    use_container_width=True
+):
 
-    st.session_state.image_bytes = None
-    st.session_state.image_name = None
     st.session_state.prediction = None
     st.session_state.confidence = None
     st.session_state.inspection_time = None
+    st.session_state.image_name = None
+    st.session_state.image_bytes = None
+
+    # Change the uploader key so the previous file
+    # is removed from the upload widget.
+    st.session_state.uploader_version += 1
 
     st.rerun()
 
 
-# ---------------- FOOTER ----------------
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
-st.markdown("""
-<div style="background-color:#14213D;
-            color:white;
-            padding:12px;
-            text-align:center;
-            border-radius:8px;">
-    INDUSTRIAL DEFECT DETECTION SYSTEM | RESNET18
-</div>
-""", unsafe_allow_html=True)
+st.divider()
+
+st.caption(
+    "Industrial Defect Detection | "
+    "ResNet18 Deep Learning Model | "
+    "Academic Project"
+)
