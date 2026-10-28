@@ -1,4 +1,15 @@
-# Industrial Defect Detection System
+# Industrial Defect Detection
+
+A deep learning project that detects defective and normal casting images using a trained ResNet18 model.
+
+## 🚀 Live Demo
+
+**Try the application here:**  
+https://industrial-defect-detection-npsgp9sjhj9jlacvhpofnn.streamlit.app
+
+## 💻 Source Code
+
+Explore the source code in this GitHub repository.# Industrial Defect Detection System
 
 ## Overview
 This project uses deep learning to classify industrial casting images as defective or normal. It uses a ResNet18 convolutional neural network trained for binary image classification.
