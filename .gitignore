@@ -1,0 +1,16 @@
+# Python virtual environments
+.venv/
+.venv-new/
+venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# macOS files
+.DS_Store
+
+# Local prediction history
+prediction_history.csv
+
+# Generated evaluation image
